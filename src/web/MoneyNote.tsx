@@ -1,9 +1,10 @@
 // 머니노트: 해마다 오는 지출(재산세·명절·생일·여행·계절 옷…)을 1년 × 12달 표에 미리 적어 두는 곳.
 // 적어 둔 달은 그 합이 그 카테고리의 그달 예산이 된다 (안 적은 달은 그달 예산·기본 예산). 한 칸에 여러 줄(예: 추석 양가 40만 + 엄마 생일 10만).
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { parseAmount, won } from '../shared/rules';
 import { api } from './api';
 import type { Boot, Toast } from './data';
+import type { Category } from '../shared/types';
 import { Icon } from './Icon';
 
 interface Note {
@@ -18,15 +19,21 @@ interface Data {
   year: string;
   notes: Note[];
   budgets: { categoryId: string; month: string; amount: number }[];
+  items?: { categoryId: string; title: string }[];
 }
 
 const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
 
-export function MoneyNote({ boot, onError, toast, go, initial, embedded = false }: { boot: Boot; onError: (e: unknown) => void; toast: Toast; go: (h: string) => void; initial?: { year?: string; month?: string; category?: string }; embedded?: boolean }) {
+export function MoneyNote({ boot, onError, toast, go, initial, embedded = false, reloadBoot }: { boot: Boot; onError: (e: unknown) => void; toast: Toast; go: (h: string) => void; initial?: { year?: string; month?: string; category?: string }; embedded?: boolean; reloadBoot?: () => void }) {
   const year = initial?.year ?? boot.today.slice(0, 4);
   const setYear = (y: string) => go(`#/plan?tab=note&year=${y}`);
   const [d, setD] = useState<Data | null>(null);
   const [sel, setSel] = useState<{ categoryId: string; month: string } | null>(initial?.month && initial?.category ? { categoryId: initial.category, month: initial.month } : null);
+  // 항목별로 펼쳐 보기 (엑셀처럼 카테고리 아래에 '엄마 생신'·'명절' 줄). 기기마다 기억
+  const [expand, setExpandState] = useState(() => localStorage.getItem('mn-expand') === '1');
+  const setExpand = (v: boolean) => (localStorage.setItem('mn-expand', v ? '1' : '0'), setExpandState(v));
+  const [listEdit, setListEdit] = useState(false);
+  const [itemPop, setItemPop] = useState<{ cid: string; title: string; focus?: string } | null>(null); // 세부 항목 팝업 (title '' = 새 항목)
   const load = useCallback(() => api<Data>(`/money-notes?year=${year}`).then(setD).catch(onError), [year, onError]);
   useEffect(() => void load(), [load]);
 
@@ -41,6 +48,18 @@ export function MoneyNote({ boot, onError, toast, go, initial, embedded = false 
       const r = await api<Data & { copied: number }>('/money-notes/copy', { year });
       setD(r);
       toast(`${r.copied}개 불러왔어요 — 금액을 올해에 맞게 고쳐 주세요`);
+    } catch (e) {
+      onError(e);
+    }
+  }
+  // 세부 항목 줄 = 저장해 둔 줄(금액 없어도 남음) + 금액을 적은 줄 이름
+  const itemsOf = (cid: string) => [...new Set([...(d.items ?? []).filter((x) => x.categoryId === cid).map((x) => x.title.trim()), ...d.notes.filter((n) => n.categoryId === cid).map((n) => n.title.trim())])];
+  async function deleteItem(cid: string, title: string) {
+    const has = d!.notes.some((n) => n.categoryId === cid && n.title.trim() === title);
+    if (!confirm(has ? `'${title}' 줄을 ${year}년 머니노트에서 지울까요? (적어 둔 금액도 함께 지워져요)` : `'${title}' 줄을 지울까요?`)) return;
+    try {
+      setD(await api<Data>('/money-item/delete', { year, categoryId: cid, title }));
+      setItemPop(null);
     } catch (e) {
       onError(e);
     }
@@ -67,10 +86,19 @@ export function MoneyNote({ boot, onError, toast, go, initial, embedded = false 
           )}
           <span className="muted">특별지출(생신·명절·재산세·정기 검진·여행…)을 달마다 미리 적어요 → 1년 총액은 미리 떼어 둘 돈, 그달 예산에도 들어가요</span>
           <span className="spacer" />
+          {reloadBoot && (
+            <button className={`btn sm ${listEdit ? 'main' : ''}`} onClick={() => setListEdit(!listEdit)}>
+              목록 고치기
+            </button>
+          )}
+          <label className="check">
+            <input type="checkbox" checked={expand} onChange={(e) => setExpand(e.target.checked)} /> 항목별로 펼쳐 보기
+          </label>
           <button className="btn sm" onClick={copyPrev}>
             {Number(year) - 1}년 머니노트 불러오기
           </button>
         </div>
+        {listEdit && reloadBoot && <ListEditor boot={boot} onError={onError} toast={toast} reloadBoot={reloadBoot} onClose={() => setListEdit(false)} />}
         {cats.length === 0 ? (
           <div className="card">
             <p>머니노트로 예산을 잡을 카테고리가 아직 없어요. 설정 → 카테고리에서 [고치기] → '머니노트로 예산 잡기'를 켜 주세요 (명절·생일·재산세·여행처럼 해마다 오는 것).</p>
@@ -95,7 +123,8 @@ export function MoneyNote({ boot, onError, toast, go, initial, embedded = false 
                 </thead>
                 <tbody>
                   {cats.map((c) => (
-                    <tr key={c.id}>
+                    <Fragment key={c.id}>
+                    <tr className={expand ? 'mn-cat' : ''}>
                       <td>
                         <span className="withico">
                           <Icon name={c.icon} /> <b>{c.name}</b>
@@ -125,6 +154,34 @@ export function MoneyNote({ boot, onError, toast, go, initial, embedded = false 
                         <b>{won(MONTHS.reduce((n, m) => n + cellSum(c.id, m), 0))}</b>
                       </td>
                     </tr>
+                    {expand && (
+                      <>
+                        {itemsOf(c.id).map((t) => {
+                          const amt = (m: string) => notesOf(c.id, m).filter((n) => n.title.trim() === t).reduce((a, n) => a + n.amount, 0);
+                          return (
+                            <tr key={t} className="mn-item">
+                              <td className="cell-click" title="눌러서 이름·금액 고치기, 줄 지우기" onClick={() => setItemPop({ cid: c.id, title: t })}>
+                                {t || '(이름 없음)'}
+                              </td>
+                              {MONTHS.map((m) => (
+                                <td key={m} className={`r cell-click ${`${year}-${m}` === thisMonth ? 'now' : ''}`} onClick={() => setItemPop({ cid: c.id, title: t, focus: m })}>
+                                  {amt(m) ? won(amt(m)) : ''}
+                                </td>
+                              ))}
+                              <td className="r">{won(MONTHS.reduce((a, m) => a + amt(m), 0))}</td>
+                            </tr>
+                          );
+                        })}
+                        <tr className="mn-item mn-add">
+                          <td colSpan={14}>
+                            <button className="btn sm" onClick={() => setItemPop({ cid: c.id, title: '' })}>
+                              ＋ 세부 항목
+                            </button>
+                          </td>
+                        </tr>
+                      </>
+                    )}
+                    </Fragment>
                   ))}
                   <tr className="sum">
                     <td>달 합계</td>
@@ -140,6 +197,28 @@ export function MoneyNote({ boot, onError, toast, go, initial, embedded = false 
             </div>
             <p className="muted small">칸을 누르면 아래에서 적을 수 있어요. (괄호 숫자)는 머니노트를 안 적은 달에 쓰이는 예산이에요 — 머니노트를 적으면 그 금액이 그달 예산이 돼요.</p>
           </div>
+        )}
+        {itemPop && (
+          <ItemPopup
+            key={`${itemPop.cid}-${itemPop.title}`}
+            year={year}
+            cat={boot.categories.find((c) => c.id === itemPop.cid)?.name ?? ''}
+            title={itemPop.title}
+            focus={itemPop.focus}
+            taken={itemsOf(itemPop.cid).filter((x) => x !== itemPop.title)}
+            notes={d.notes.filter((n) => n.categoryId === itemPop.cid && n.title.trim() === itemPop.title && itemPop.title !== '')}
+            onClose={() => setItemPop(null)}
+            onDelete={() => deleteItem(itemPop.cid, itemPop.title)}
+            onSave={async (title, amounts) => {
+              try {
+                setD(await api<Data>('/money-item/save', { year, categoryId: itemPop.cid, from: itemPop.title, title, amounts }));
+                toast('저장했어요');
+                setItemPop(null);
+              } catch (e) {
+                onError(e);
+              }
+            }}
+          />
         )}
         {sel && <CellEditor key={`${sel.categoryId}-${sel.month}`} sel={sel} notes={d.notes.filter((n) => n.categoryId === sel.categoryId && n.month === sel.month)} boot={boot} onClose={() => setSel(null)} onChanged={setD} onError={onError} toast={toast} />}
       </div>
@@ -233,6 +312,138 @@ function CellEditor({ sel, notes, boot, onClose, onChanged, onError, toast }: { 
             ＋ 한 줄 더 적기
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+// 머니노트 목록 고치기: 어떤 지출 카테고리를 머니노트에 넣을지 · 이름 바꾸기 · 새로 추가
+function ListEditor({ boot, onError, toast, reloadBoot, onClose }: { boot: Boot; onError: (e: unknown) => void; toast: Toast; reloadBoot: () => void; onClose: () => void }) {
+  const [name, setName] = useState('');
+  const [names, setNames] = useState<Record<string, string>>({});
+  const spend = boot.categories.filter((c) => (c.grp === 'var' || c.grp === 'fix') && !c.hidden).sort((a, b) => Number(b.moneynote) - Number(a.moneynote) || (a.grp === b.grp ? a.sort - b.sort : a.grp === 'var' ? -1 : 1));
+  async function save(c: Partial<Category>, msg: string) {
+    try {
+      await api('/categories', c);
+      toast(msg);
+      reloadBoot();
+    } catch (e) {
+      onError(e);
+    }
+  }
+  async function add() {
+    if (!name.trim()) return;
+    await save({ grp: 'var', name: name.trim(), icon: '', budget: 0, moneynote: true }, `'${name.trim()}' 추가했어요`);
+    setName('');
+  }
+  return (
+    <div className="card">
+      <h3 className="row">
+        머니노트 목록 고치기
+        <span className="spacer" />
+        <button className="btn sm" onClick={onClose}>
+          닫기
+        </button>
+      </h3>
+      <p className="muted small">체크한 카테고리가 머니노트에 줄로 보여요. 이름은 고친 뒤 칸 밖을 누르면 저장돼요. (카테고리 지우기·순서는 설정 › 카테고리 예산)</p>
+      <table className="list">
+        <tbody>
+          {spend.map((c) => (
+            <tr key={c.id}>
+              <td style={{ width: 40 }}>
+                <input type="checkbox" checked={!!c.moneynote} onChange={(e) => save({ ...c, moneynote: e.target.checked }, e.target.checked ? `'${c.name}' 머니노트에 넣었어요` : `'${c.name}' 머니노트에서 뺐어요`)} />
+              </td>
+              <td>
+                <input
+                  className="text"
+                  value={names[c.id] ?? c.name}
+                  onChange={(e) => setNames({ ...names, [c.id]: e.target.value })}
+                  onBlur={() => {
+                    const v = (names[c.id] ?? c.name).trim();
+                    if (v && v !== c.name) save({ ...c, name: v }, '이름을 바꿨어요');
+                  }}
+                />
+              </td>
+              <td className="muted small">{c.grp === 'fix' ? '고정지출' : '변동지출'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="row" style={{ marginTop: 10 }}>
+        <input className="text" placeholder="새 항목 (예: 보리 병원)" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} />
+        <button className="btn main" onClick={add}>
+          ＋ 추가
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// 세부 항목 팝업: 이름 + 1~12월 금액을 한 번에 고치고, 줄 지우기도 여기서
+function ItemPopup({ year, cat, title, focus, taken, notes, onClose, onDelete, onSave }: { year: string; cat: string; title: string; focus?: string; taken: string[]; notes: Note[]; onClose: () => void; onDelete: () => void; onSave: (title: string, amounts: Record<string, number | null>) => void }) {
+  const isNew = title === '';
+  const [name, setName] = useState(title);
+  const sumOf = (m: string) => notes.filter((n) => n.month === `${year}-${m}`).reduce((a, n) => a + n.amount, 0);
+  const multi = (m: string) => notes.filter((n) => n.month === `${year}-${m}`).length > 1;
+  const [vals, setVals] = useState<Record<string, string>>(() => Object.fromEntries(MONTHS.map((m) => [m, sumOf(m) ? won(sumOf(m)) : ''])));
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    document.addEventListener('keydown', esc);
+    return () => document.removeEventListener('keydown', esc);
+  }, [onClose]);
+  const total = MONTHS.reduce((a, m) => a + (parseAmount(vals[m]) ?? 0), 0);
+  function save() {
+    const t = name.trim();
+    if (!t) return alert('이름을 적어 주세요.');
+    if (taken.includes(t)) return alert('같은 이름의 항목이 이미 있어요.');
+    const amounts: Record<string, number | null> = {};
+    for (const m of MONTHS) if (!multi(m)) amounts[m] = parseAmount(vals[m]) ?? 0;
+    onSave(t, amounts);
+  }
+  return (
+    <div className="pop-bg" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="card pop">
+        <h3>{isNew ? `${cat} · 세부 항목 추가` : `${cat} · ${title}`}</h3>
+        <div className="vform">
+          <label>이름</label>
+          <input className="text" autoFocus={!focus} value={name} placeholder="예: 엄마 생신, 명절, 재산세" onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="pop-months">
+          {MONTHS.map((m) => (
+            <label key={m} className="pop-month">
+              <span>{Number(m)}월</span>
+              <input
+                className="text money"
+                inputMode="numeric"
+                placeholder="0"
+                autoFocus={focus === m}
+                disabled={multi(m)}
+                title={multi(m) ? '이 달에는 같은 이름이 여러 줄이라 칸을 눌러 아래에서 고쳐 주세요' : ''}
+                value={vals[m]}
+                onChange={(e) => {
+                  const n = parseAmount(e.target.value);
+                  setVals({ ...vals, [m]: n === null ? '' : won(n) });
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && save()}
+              />
+            </label>
+          ))}
+        </div>
+        <p className="muted small">1년 합계 <b>{won(total)}원</b> · 금액을 비우면 그달은 지워져요. 금액이 없어도 줄은 남아요.</p>
+        <div className="row">
+          {!isNew && (
+            <button className="btn sm danger" onClick={onDelete}>
+              이 줄 지우기
+            </button>
+          )}
+          <span className="spacer" />
+          <button className="btn" onClick={onClose}>
+            닫기
+          </button>
+          <button className="btn main" onClick={save}>
+            저장
+          </button>
+        </div>
       </div>
     </div>
   );

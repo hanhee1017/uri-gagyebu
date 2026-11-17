@@ -66,19 +66,70 @@ function Categories({ boot, onError, toast, reloadBoot }: P) {
       onError(e);
     }
   }
-  async function move(id: string, dir: -1 | 1) {
+  // 끌어서 순서 바꾸기: 손잡이(⋮⋮)를 누른 채 위아래로 → 놓으면 저장
+  const [drag, setDrag] = useState<{ grp: string; id: string; ids: string[]; moved: boolean } | null>(null);
+  function dragStart(e: React.PointerEvent, grp: string, id: string, ids: string[]) {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setDrag({ grp, id, ids, moved: false });
+  }
+  function dragMove(e: React.PointerEvent) {
+    if (!drag) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest('tr[data-cat]') as HTMLElement | null;
+    const over = el?.dataset.cat;
+    if (!over || over === drag.id || el?.dataset.grp !== drag.grp) return;
+    const ids = drag.ids.filter((x) => x !== drag.id);
+    const at = ids.indexOf(over);
+    const from = drag.ids.indexOf(drag.id), to = drag.ids.indexOf(over);
+    ids.splice(to > from ? at + 1 : at, 0, drag.id);
+    setDrag({ ...drag, ids, moved: true });
+  }
+  async function dragEnd() {
+    if (!drag) return;
+    const d = drag;
+    if (!d.moved) return setDrag(null);
     try {
-      await api('/categories/move', { id, dir });
+      await api('/categories/order', { ids: d.ids });
+      reloadBoot();
+    } catch (e) {
+      onError(e);
+    }
+    setTimeout(() => setDrag(null), 300); // 새 순서가 올 때까지 끌어 둔 순서 유지
+  }
+
+  // 지우기: 쓰는 곳이 있으면 옮길 카테고리 고르기
+  const [del, setDel] = useState<{ tx: number; recurring: number; notes: number; loans: number; moveTo: string } | null>(null);
+  async function askDelete() {
+    if (!edit?.id) return;
+    try {
+      const u = await api<{ tx: number; recurring: number; notes: number; loans: number }>(`/categories/usage?id=${edit.id}`);
+      if (u.tx + u.recurring + u.notes + u.loans === 0) {
+        if (!confirm(`'${edit.name}' 카테고리를 지울까요? (쓴 기록이 없어요)`)) return;
+        await doDelete(null);
+      } else setDel({ ...u, moveTo: '' });
+    } catch (e) {
+      onError(e);
+    }
+  }
+  async function doDelete(moveTo: string | null) {
+    if (!edit?.id) return;
+    try {
+      await api('/categories/delete', { id: edit.id, moveTo });
+      toast(moveTo ? `옮기고 지웠어요` : '지웠어요');
+      setDel(null);
+      setEdit(null);
       reloadBoot();
     } catch (e) {
       onError(e);
     }
   }
+  const sideOf = (g?: string) => (g === 'var' || g === 'fix' || g === 'spc' ? 'out' : g);
   return (
     <div className="split">
       <div className="main-col">
         {boot.groups.map((g) => {
-          const cats = boot.categories.filter((c) => c.grp === g.key);
+          const base = boot.categories.filter((c) => c.grp === g.key);
+          const cats = drag?.grp === g.key ? drag.ids.map((id) => base.find((c) => c.id === id)!).filter(Boolean) : base;
           const sum = cats.filter((c) => !c.hidden).reduce((s, c) => s + c.budget, 0);
           return (
             <div className="card" key={g.key}>
@@ -92,24 +143,22 @@ function Categories({ boot, onError, toast, reloadBoot }: P) {
               </h3>
               <table className="list">
                 <tbody>
-                  {cats.map((c, i) => (
-                    <tr key={c.id} className={c.hidden ? 'dim' : ''}>
+                  {cats.map((c) => (
+                    <tr key={c.id} data-cat={c.id} data-grp={g.key} className={`${c.hidden ? 'dim' : ''} ${drag?.id === c.id ? 'dragging' : ''}`}>
                       <td>
+                        
                         <Icon name={c.icon} /> <b>{c.name}</b> {c.hidden && <span className="tag">숨김</span>}
                       </td>
                       <td className="r">
                         {c.moneynote && <span className="tag" title="머니노트에 적은 달은 그 금액이 예산">머니노트</span>} {c.budget ? `월 ${won(c.budget)}원` : <span className="muted">예산 없음</span>}
                       </td>
                       <td className="r nowrap">
-                        <button className="btn sm" disabled={i === 0} onClick={() => move(c.id, -1)}>
-                          ▲
-                        </button>
-                        <button className="btn sm" disabled={i === cats.length - 1} onClick={() => move(c.id, 1)}>
-                          ▼
-                        </button>
-                        <button className="btn sm" onClick={() => setEdit({ ...c })}>
+                        <button className="btn sm" onClick={() => (setDel(null), setEdit({ ...c }))}>
                           고치기
                         </button>
+                        <span className="drag-handle" title="꾹 누른 채 위아래로 끌면 순서가 바뀌어요" onPointerDown={(e) => dragStart(e, g.key, c.id, base.map((x) => x.id))} onPointerMove={dragMove} onPointerUp={dragEnd} onPointerCancel={dragEnd}>
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+                        </span>
                       </td>
                     </tr>
                   ))}
@@ -119,7 +168,7 @@ function Categories({ boot, onError, toast, reloadBoot }: P) {
           );
         })}
       </div>
-      <div className="side-col">
+      <div className={`side-col ${edit ? 'as-modal' : ''}`} onClick={(e) => e.target === e.currentTarget && setEdit(null)}>
         {edit && (
           <div className="card sticky">
             <h3>{edit.id ? '카테고리 고치기' : '카테고리 추가'}</h3>
@@ -143,7 +192,7 @@ function Categories({ boot, onError, toast, reloadBoot }: P) {
                 ))}
               </div>
               <label>월 예산</label>
-              <input className="text money" inputMode="numeric" value={won(edit.budget ?? 0)} onChange={(e) => setEdit({ ...edit, budget: parseAmount(e.target.value) ?? 0 })} />
+              <input className="text money" inputMode="numeric" placeholder="0" value={edit.budget ? won(edit.budget) : ''} onChange={(e) => setEdit({ ...edit, budget: parseAmount(e.target.value) ?? 0 })} />
               {(edit.grp === 'var' || edit.grp === 'fix') && (
                 <>
                   <label />
@@ -153,14 +202,21 @@ function Categories({ boot, onError, toast, reloadBoot }: P) {
                   {edit.moneynote && (
                     <>
                       <label />
-                      <span className="seg">
-                        <button className={!edit.moneynoteAdd ? 'on' : ''} onClick={() => setEdit({ ...edit, moneynoteAdd: false })}>
-                          적은 달은 머니노트 금액으로
-                        </button>
-                        <button className={edit.moneynoteAdd ? 'on' : ''} onClick={() => setEdit({ ...edit, moneynoteAdd: true })}>
-                          월 예산 + 머니노트 더하기
-                        </button>
-                      </span>
+                      <div className="mn-mode">
+                        <div className="mn-mode-q">머니노트에 금액을 적은 달, 그달 예산은?</div>
+                        {[
+                          { add: false, t: '머니노트 금액만', ex: (b: string) => `월 예산 ${b} 대신 머니노트 금액만 (예: 경조사·여행처럼 평소엔 안 쓰는 것)` },
+                          { add: true, t: '월 예산 + 머니노트', ex: (b: string) => `월 예산 ${b}에 머니노트 금액을 더해서 (예: 자동차 — 기름값은 매달, 정비비는 그달에 더)` },
+                        ].map((o) => (
+                          <label key={String(o.add)} className={`mn-mode-opt ${!!edit.moneynoteAdd === o.add ? 'on' : ''}`}>
+                            <input type="radio" checked={!!edit.moneynoteAdd === o.add} onChange={() => setEdit({ ...edit, moneynoteAdd: o.add })} />
+                            <span>
+                              <b>{o.t}</b>
+                              <span className="muted small"> — {o.ex(edit.budget ? `${won(edit.budget)}원` : '')}</span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
                     </>
                   )}
                 </>
@@ -174,16 +230,59 @@ function Categories({ boot, onError, toast, reloadBoot }: P) {
                 </>
               )}
               <label />
-              <div className="row">
-                <button className="btn main" onClick={save}>
-                  저장
-                </button>
+              <span className="muted small">이름을 바꾸거나 대분류를 옮겨도 지난 거래는 그대로 따라와요.</span>
+              {edit.id && del && (
+                <>
+                  <label />
+                  {(
+                    <div className="del-box">
+                      <p>
+                        <b>{edit.name}</b>에 적힌 것: {[del.tx && `거래 ${del.tx}건`, del.recurring && `고정지출 ${del.recurring}개`, del.notes && `머니노트 ${del.notes}줄`, del.loans && `상환표 연결`].filter(Boolean).join(', ')}
+                      </p>
+                      <p className="muted small">지우기 전에 이것들을 옮길 카테고리를 골라 주세요. 돈 기록은 하나도 사라지지 않고, 지난 결산 숫자도 옮긴 카테고리에 합쳐져요.</p>
+                      <select className="text" value={del.moveTo} onChange={(e) => setDel({ ...del, moveTo: e.target.value })}>
+                        <option value="">옮길 카테고리 고르기</option>
+                        {boot.groups
+                          .filter((g) => sideOf(g.key) === sideOf(boot.categories.find((c) => c.id === edit.id)?.grp))
+                          .map((g) => (
+                            <optgroup key={g.key} label={g.name}>
+                              {boot.categories
+                                .filter((c) => c.grp === g.key && c.id !== edit.id)
+                                .map((c) => (
+                                  <option key={c.id} value={c.id}>
+                                    {c.name}
+                                    {c.hidden ? ' (숨김)' : ''}
+                                  </option>
+                                ))}
+                            </optgroup>
+                          ))}
+                      </select>
+                      <div className="row" style={{ marginTop: 8 }}>
+                        <button className="btn sm danger" disabled={!del.moveTo} onClick={() => doDelete(del.moveTo)}>
+                          옮기고 지우기
+                        </button>
+                        <button className="btn sm" onClick={() => setDel(null)}>
+                          그만두기
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="row pop-actions">
+                {edit.id && !del && (
+                  <button className="btn sm danger" onClick={askDelete}>
+                    이 카테고리 지우기
+                  </button>
+                )}
+                <span className="spacer" />
                 <button className="btn" onClick={() => setEdit(null)}>
                   닫기
                 </button>
+                <button className="btn main" onClick={save}>
+                  저장
+                </button>
               </div>
-              <label />
-              <span className="muted small">이름을 바꾸거나 대분류를 옮겨도 지난 거래는 그대로 따라와요.</span>
             </div>
           </div>
         )}
@@ -272,7 +371,7 @@ function RecurringList({ boot, onError, toast, reloadBoot }: P) {
           <p className="muted small"><b>매월 자동</b>: 정한 날 그달 거래가 저절로 들어가요. <b>한꺼번에 넣기</b>: 거래 화면 위 '고정지출'에서 금액을 확인하고 한 번에 넣어요(날짜·금액이 조금씩 바뀌는 항목에 좋아요).</p>
         </div>
       </div>
-      <div className="side-col">
+      <div className={`side-col ${edit ? 'as-modal' : ''}`} onClick={(e) => e.target === e.currentTarget && setEdit(null)}>
         {edit && (
           <div className="card sticky">
             <h3>{edit.id ? '고정 항목 고치기' : '고정 항목 추가'}</h3>
@@ -295,7 +394,7 @@ function RecurringList({ boot, onError, toast, reloadBoot }: P) {
                 ))}
               </select>
               <label>금액</label>
-              <input className="text money" inputMode="numeric" value={won(edit.amount ?? 0)} onChange={(e) => setEdit({ ...edit, amount: parseAmount(e.target.value) ?? 0 })} />
+              <input className="text money" inputMode="numeric" placeholder="0" value={edit.amount ? won(edit.amount) : ''} onChange={(e) => setEdit({ ...edit, amount: parseAmount(e.target.value) ?? 0 })} />
               <label>넣는 방식</label>
               <span className="seg">
                 <button className={edit.mode !== 'batch' ? 'on' : ''} onClick={() => setEdit({ ...edit, mode: 'auto' })}>
@@ -309,7 +408,7 @@ function RecurringList({ boot, onError, toast, reloadBoot }: P) {
                 <>
                   <label>매월</label>
                   <div className="row">
-                    <input className="text" type="number" min={1} max={31} style={{ width: 80 }} value={edit.day ?? 1} onChange={(e) => setEdit({ ...edit, day: Number(e.target.value) || 1 })} />일
+                    <input className="text" inputMode="numeric" style={{ width: 80 }} value={edit.day ? String(edit.day) : ''} onChange={(e) => { const v = e.target.value.replace(/\D/g, '').slice(0, 2); setEdit({ ...edit, day: v ? Math.min(31, Number(v)) : 0 }); }} onBlur={() => !edit.day && setEdit({ ...edit, day: 1 })} />일
                   </div>
                 </>
               )}
@@ -353,13 +452,13 @@ function RecurringList({ boot, onError, toast, reloadBoot }: P) {
               )}
               <label>끝나는 달</label>
               <input className="text" type="month" value={edit.endMonth ?? ''} onChange={(e) => setEdit({ ...edit, endMonth: e.target.value || null })} />
-              <label />
-              <div className="row">
-                <button className="btn main" onClick={save}>
-                  저장
-                </button>
+              <div className="row pop-actions">
+                <span className="spacer" />
                 <button className="btn" onClick={() => setEdit(null)}>
                   닫기
+                </button>
+                <button className="btn main" onClick={save}>
+                  저장
                 </button>
               </div>
             </div>

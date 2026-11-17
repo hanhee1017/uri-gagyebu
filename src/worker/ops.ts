@@ -291,6 +291,73 @@ export async function moveCategory(env: Env, id: string, dir: -1 | 1) {
   return getCategories(env);
 }
 
+/** 카테고리 순서를 통째로 정한다 (끌어서 옮기기). ids = 같은 대분류 안의 새 순서 */
+export async function orderCategories(env: Env, ids: unknown) {
+  if (!Array.isArray(ids) || ids.length === 0) throw new UserError('순서가 비어 있어요.');
+  const cats = await getCategories(env);
+  const first = cats.find((x) => x.id === ids[0]);
+  if (!first) throw new UserError('없는 카테고리예요.');
+  const same = cats.filter((x) => x.grp === first.grp);
+  if (ids.length !== same.length || !same.every((c) => ids.includes(c.id))) throw new UserError('목록이 바뀌었어요. 새로고침해 주세요.');
+  await env.DB.batch(ids.map((id, k) => env.DB.prepare('UPDATE categories SET sort = ? WHERE id = ?').bind(k, String(id))));
+  return getCategories(env);
+}
+
+/** 이 카테고리를 쓰는 곳 수 (지우기 전에 보여 줌) */
+export async function categoryUsage(env: Env, id: string) {
+  const n = (sql: string) => first(env, sql, [id], (r) => Number(r.n)).then((v) => v ?? 0);
+  return {
+    tx: await n('SELECT COUNT(*) AS n FROM transactions WHERE category_id = ?'),
+    recurring: await n('SELECT COUNT(*) AS n FROM recurring WHERE category_id = ?'),
+    notes: await n('SELECT COUNT(*) AS n FROM money_notes WHERE category_id = ?'),
+    loans: await n('SELECT COUNT(*) AS n FROM loan_links WHERE principal_category = ?1 OR interest_category = ?1'),
+  };
+}
+
+const sideOf = (g: string) => (g === 'var' || g === 'fix' || g === 'spc' ? 'out' : g);
+
+/** 카테고리 지우기. 쓰는 곳이 있으면 moveTo 카테고리로 옮긴 뒤 지운다 (돈 기록은 하나도 안 사라짐).
+ *  그 카테고리만의 달별 예산·예산 메모·바뀐 기록·결산 원인은 함께 지움. 다짐은 옮김. */
+export async function deleteCategory(env: Env, user: User, id: string, moveTo: string | null) {
+  const cats = await getCategories(env);
+  const c = cats.find((x) => x.id === id);
+  if (!c) throw new UserError('없는 카테고리예요.');
+  const u = await categoryUsage(env, id);
+  const used = u.tx + u.recurring + u.notes + u.loans > 0;
+  let to: Category | undefined;
+  if (used) {
+    to = cats.find((x) => x.id === moveTo);
+    if (!to || to.id === id) throw new UserError('옮길 카테고리를 골라 주세요.');
+    if (sideOf(to.grp) !== sideOf(c.grp)) throw new UserError('지출은 지출 카테고리로, 수입은 수입 카테고리로 옮길 수 있어요.');
+  }
+  const st = (sql: string, ...b: unknown[]) => env.DB.prepare(sql).bind(...b);
+  const steps = [];
+  if (to) {
+    steps.push(
+      st('UPDATE transactions SET category_id = ? WHERE category_id = ?', to.id, id),
+      st('UPDATE recurring SET category_id = ? WHERE category_id = ?', to.id, id),
+      st('UPDATE money_notes SET category_id = ? WHERE category_id = ?', to.id, id),
+      st('UPDATE OR IGNORE money_note_items SET category_id = ? WHERE category_id = ?', to.id, id),
+      st('UPDATE loan_links SET principal_category = ? WHERE principal_category = ?', to.id, id),
+      st('UPDATE loan_links SET interest_category = ? WHERE interest_category = ?', to.id, id),
+      st('UPDATE pledges SET category_id = ? WHERE category_id = ?', to.id, id),
+    );
+  } else {
+    steps.push(st('UPDATE pledges SET category_id = NULL WHERE category_id = ?', id));
+  }
+  steps.push(
+    st('DELETE FROM money_note_items WHERE category_id = ?', id),
+    st('DELETE FROM budgets WHERE category_id = ?', id),
+    st('DELETE FROM budget_notes WHERE category_id = ?', id),
+    st('DELETE FROM budget_changes WHERE category_id = ?', id),
+    st('DELETE FROM review_causes WHERE category_id = ?', id),
+    st('DELETE FROM categories WHERE id = ?', id),
+  );
+  await env.DB.batch(steps);
+  await log(env, user.name, 'category.delete', { name: c.name, movedTo: to?.name ?? null, ...u });
+  return getCategories(env);
+}
+
 export async function setMonthBudget(env: Env, user: User, input: { categoryId: string; month: string; amount: number | null; reason?: string }) {
   if (!isMonth(input.month)) throw new UserError('달이 이상해요.');
   // 바꾸기 전 값을 기록해 두면 나중에 그대로 되돌릴 수 있다
@@ -494,6 +561,8 @@ export async function reviewView(env: Env, month: string) {
   const nextBudgetRows = await all(env, 'SELECT category_id, amount FROM budgets WHERE month = ?', [next], (r) => [String(r.category_id), Number(r.amount)] as const);
   // 다음 달 머니노트 (특별지출 예산 + 예산 짤 때 옆에 보여 주기)
   const nextNotes = await all(env, 'SELECT * FROM money_notes WHERE month = ? ORDER BY amount DESC', [next], toMoneyNote);
+  // 이번 달 머니노트 (세부 항목별 계획 ↔ 실제 비교)
+  const thisNotes = await all(env, 'SELECT * FROM money_notes WHERE month = ? ORDER BY amount DESC', [month], toMoneyNote);
   const nextSums = new Map<string, number>();
   for (const n of nextNotes) nextSums.set(n.categoryId, (nextSums.get(n.categoryId) ?? 0) + n.amount);
   const rowMap = new Map(nextBudgetRows);
@@ -527,6 +596,7 @@ export async function reviewView(env: Env, month: string) {
     raised: Object.fromEntries(raised),
     nextBudgetNotes: Object.fromEntries(await all(env, 'SELECT category_id, note FROM budget_notes WHERE month = ?', [next], (r) => [String(r.category_id), String(r.note)] as const)),
     nextNotes,
+    thisNotes,
     fixedThis: Object.fromEntries(fixedThis),
   };
 }
@@ -678,12 +748,14 @@ async function moneyNoteSums(env: Env, month: string) {
 
 export async function listMoneyNotes(env: Env, year: string) {
   if (!/^\d{4}$/.test(year)) throw new UserError('연도는 2026 같은 형식이어야 해요.');
-  const [notes, budgets] = await Promise.all([
+  const [notes, budgets, items] = await Promise.all([
     all(env, 'SELECT * FROM money_notes WHERE month >= ? AND month <= ? ORDER BY month, amount DESC', [`${year}-01`, `${year}-12`], toMoneyNote),
     // 머니노트를 아직 안 적은 칸은 예전 달별 예산을 흐리게 보여 주려고
     all(env, "SELECT b.category_id, b.month, b.amount FROM budgets b JOIN categories c ON c.id = b.category_id WHERE c.moneynote = 1 AND b.month >= ? AND b.month <= ?", [`${year}-01`, `${year}-12`], (r) => ({ categoryId: String(r.category_id), month: String(r.month), amount: Number(r.amount) })),
+    // 0023 표가 아직 없는 DB(업데이트 직후)에서도 머니노트가 열리게
+    all(env, 'SELECT category_id, title FROM money_note_items WHERE year = ? ORDER BY sort, created_at', [year], (r) => ({ categoryId: String(r.category_id), title: String(r.title) })).catch(() => []),
   ]);
-  return { year, notes, budgets };
+  return { year, notes, budgets, items };
 }
 
 export async function saveMoneyNote(env: Env, user: User, input: { id?: unknown; categoryId?: unknown; month?: unknown; title?: unknown; amount?: unknown; memo?: unknown }) {
@@ -708,6 +780,70 @@ export async function deleteMoneyNote(env: Env, user: User, id: string) {
   await run(env, 'DELETE FROM money_notes WHERE id = ?', [id]);
   await log(env, user.name, 'moneynote.delete', m);
   return listMoneyNotes(env, m.month.slice(0, 4));
+}
+
+/** 머니노트 세부 항목 줄 만들기 (금액 없이 이름만) */
+export async function addMoneyItem(env: Env, user: User, input: { year?: unknown; categoryId?: unknown; title?: unknown }) {
+  const year = String(input.year);
+  if (!/^\d{4}$/.test(year)) throw new UserError('해가 이상해요.');
+  const categoryId = String(input.categoryId ?? '');
+  if (!(await first(env, 'SELECT 1 AS x FROM categories WHERE id = ?', [categoryId], (r) => r.x))) throw new UserError('카테고리를 골라 주세요.');
+  const title = text(input.title, 60);
+  if (!title) throw new UserError('이름을 적어 주세요.');
+  const max = (await first(env, 'SELECT MAX(sort) AS m FROM money_note_items WHERE year = ? AND category_id = ?', [year, categoryId], (r) => Number(r.m ?? 0))) ?? 0;
+  await run(env, 'INSERT OR IGNORE INTO money_note_items (id, category_id, year, title, sort, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [newId(), categoryId, year, title, max + 1, user.name, Date.now()]);
+  return listMoneyNotes(env, year);
+}
+
+/** 세부 항목 한 줄을 팝업에서 한 번에 저장: 이름 + 1~12월 금액 (0이면 그달 지움). 같은 칸에 같은 이름이 여러 줄이면 그 달은 건드리지 않음 */
+export async function saveMoneyItem(env: Env, user: User, input: { year?: unknown; categoryId?: unknown; from?: unknown; title?: unknown; amounts?: unknown }) {
+  const year = String(input.year);
+  if (!/^\d{4}$/.test(year)) throw new UserError('해가 이상해요.');
+  const categoryId = String(input.categoryId ?? '');
+  if (!(await first(env, 'SELECT 1 AS x FROM categories WHERE id = ?', [categoryId], (r) => r.x))) throw new UserError('카테고리를 골라 주세요.');
+  const title = text(input.title, 60);
+  if (!title) throw new UserError('이름을 적어 주세요.');
+  const from = String(input.from ?? '').trim() || title;
+  if (from !== title) await renameMoneyItem(env, user, { year, categoryId, from, to: title });
+  await run(env, 'INSERT OR IGNORE INTO money_note_items (id, category_id, year, title, sort, created_by, created_at) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM money_note_items WHERE year = ? AND category_id = ?), ?, ?)', [newId(), categoryId, year, title, year, categoryId, user.name, Date.now()]).catch(() => undefined); // 0023 전 DB에서도 금액 저장은 되게
+  const amounts = (input.amounts ?? {}) as Record<string, unknown>;
+  const now = Date.now();
+  for (let i = 1; i <= 12; i++) {
+    const mm = String(i).padStart(2, '0');
+    if (!(mm in amounts)) continue;
+    const amount = amounts[mm] === null || amounts[mm] === '' ? 0 : int(amounts[mm], '금액');
+    const month = `${year}-${mm}`;
+    const rows = await all(env, 'SELECT id, amount FROM money_notes WHERE category_id = ? AND month = ? AND TRIM(title) = ?', [categoryId, month, title], (r) => ({ id: String(r.id), amount: Number(r.amount) }));
+    if (rows.length > 1) continue;
+    if (rows.length === 0 && amount > 0) await run(env, 'INSERT INTO money_notes (id, category_id, month, title, amount, memo, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [newId(), categoryId, month, title, amount, '', user.name, now, now]);
+    else if (rows.length === 1 && amount === 0) await run(env, 'DELETE FROM money_notes WHERE id = ?', [rows[0].id]);
+    else if (rows.length === 1 && amount !== rows[0].amount) await run(env, 'UPDATE money_notes SET amount = ?, updated_at = ? WHERE id = ?', [amount, now, rows[0].id]);
+  }
+  await log(env, user.name, 'moneynote.saveItem', { year, title });
+  return listMoneyNotes(env, year);
+}
+
+/** 머니노트 세부 항목(같은 이름 줄) 이름 바꾸기 — 그 해 그 카테고리의 같은 이름 줄 모두 */
+export async function renameMoneyItem(env: Env, user: User, input: { year?: unknown; categoryId?: unknown; from?: unknown; to?: unknown }) {
+  const year = String(input.year);
+  if (!/^\d{4}$/.test(year)) throw new UserError('해가 이상해요.');
+  const to = text(input.to, 60);
+  if (!to) throw new UserError('새 이름을 적어 주세요.');
+  await run(env, "UPDATE money_notes SET title = ?, updated_at = ? WHERE category_id = ? AND TRIM(title) = ? AND month LIKE ?", [to, Date.now(), String(input.categoryId), String(input.from ?? '').trim(), `${year}-%`]);
+  await run(env, 'UPDATE OR IGNORE money_note_items SET title = ? WHERE category_id = ? AND year = ? AND title = ?', [to, String(input.categoryId), year, String(input.from ?? '').trim()]).catch(() => undefined);
+  await run(env, 'DELETE FROM money_note_items WHERE category_id = ? AND year = ? AND title = ?', [String(input.categoryId), year, String(input.from ?? '').trim()]).catch(() => undefined);
+  await log(env, user.name, 'moneynote.rename', { year, from: input.from, to });
+  return listMoneyNotes(env, year);
+}
+
+/** 머니노트 세부 항목 줄 통째로 지우기 (그 해 그 카테고리의 같은 이름 줄 모두) */
+export async function deleteMoneyItem(env: Env, user: User, input: { year?: unknown; categoryId?: unknown; title?: unknown }) {
+  const year = String(input.year);
+  if (!/^\d{4}$/.test(year)) throw new UserError('해가 이상해요.');
+  await run(env, "DELETE FROM money_notes WHERE category_id = ? AND TRIM(title) = ? AND month LIKE ?", [String(input.categoryId), String(input.title ?? '').trim(), `${year}-%`]);
+  await run(env, 'DELETE FROM money_note_items WHERE category_id = ? AND year = ? AND title = ?', [String(input.categoryId), year, String(input.title ?? '').trim()]).catch(() => undefined);
+  await log(env, user.name, 'moneynote.deleteItem', { year, title: input.title });
+  return listMoneyNotes(env, year);
 }
 
 // ---------- 머니플랜 (연간 계획) ----------
@@ -773,6 +909,7 @@ export async function copyMoneyNotes(env: Env, user: User, year: unknown) {
     await run(env, 'INSERT INTO money_notes (id, category_id, month, title, amount, memo, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [newId(), r.categoryId, m, r.title, r.amount, `${prev}년에서 불러옴`, user.name, now, now]);
     n++;
   }
+  await run(env, 'INSERT OR IGNORE INTO money_note_items (id, category_id, year, title, sort, created_by, created_at) SELECT lower(hex(randomblob(16))), category_id, ?, title, sort, ?, ? FROM money_note_items WHERE year = ?', [y, user.name, now, prev]);
   await log(env, user.name, 'moneynote.copy', { from: prev, to: y, n });
   return { copied: n, ...(await listMoneyNotes(env, y)) };
 }
