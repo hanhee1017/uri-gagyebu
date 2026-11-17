@@ -1,20 +1,18 @@
 import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
-// 금액 칸에 어디서 복사한 값이든 붙여넣기: '245,600원', '₩ 245,600', '245600.00' 등에서 숫자만 꺼내
-// 칸에 있던 값은 바꿔치기(뒤에 이어 붙어서 엉뚱한 큰 숫자가 되는 일 막기)
+// 금액 칸에 어디서 복사한 값이든 붙여넣기: 기기 기본 붙여넣기는 그대로 두고(삼성 탭 등에서도 되게),
+// 붙여넣기 직전에 칸 글자를 모두 골라 둬서 '이어 붙기' 대신 '바꿔치기'가 되게 함. 숫자만 꺼내는 건 칸의 parseAmount가 함
+document.documentElement.dataset.theme = localStorage.getItem('gb_theme') ?? 'green';
+
 document.addEventListener('paste', (e) => {
   const el = e.target as HTMLInputElement | null;
   if (!el || el.tagName !== 'INPUT' || !(el.classList.contains('money') || el.inputMode === 'numeric') || e.defaultPrevented) return;
-  const raw = e.clipboardData?.getData('text') ?? '';
-  const m = raw.match(/[-−]?\s*[\d,]+(?:\.\d+)?/);
-  if (!m) return;
-  e.preventDefault();
-  const neg = /^[-−]/.test(m[0]);
-  const digits = m[0].replace(/[^\d.]/g, '').split('.')[0];
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-  setter?.call(el, (neg ? '-' : '') + digits);
-  el.dispatchEvent(new Event('input', { bubbles: true }));
+  try {
+    el.select();
+  } catch {
+    /* 고르기 못 해도 그냥 붙여넣기 */
+  }
 });
 import { Accounts } from './Accounts';
 import { api, NeedLogin } from './api';
@@ -189,7 +187,14 @@ function App() {
   const loadStatus = useCallback(() => api<Status>('/status').then(setStatus), []);
   const loadBoot = useCallback(() => {
     api<Boot>('/bootstrap')
-      .then(setBoot)
+      .then((b) => {
+        // 꾸미기: 테마 색 (다음에 열 때 깜빡이지 않게 기기에도 기억)
+        document.documentElement.dataset.theme = b.theme ?? 'green';
+        // 휴대폰 위쪽 막대 색도 테마 색으로
+        document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#3f6e5a');
+        localStorage.setItem('gb_theme', b.theme ?? 'green');
+        setBoot(b);
+      })
       .catch((e) => (e instanceof NeedLogin ? setStatus((s) => (s ? { ...s, user: null } : s)) : toast(String(e))));
   }, [toast]);
   const onError = useCallback(

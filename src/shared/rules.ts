@@ -7,7 +7,8 @@ export const won = (n: number) => Math.round(n).toLocaleString('ko-KR');
 
 /** 금액 입력 글을 숫자로: "84,000원" → 84000. 숫자가 없으면 null */
 export function parseAmount(text: string): number | null {
-  const digits = String(text).replace(/[^\d]/g, '');
+  // '245,600.00'처럼 소수점이 붙어 오면 소수 부분은 버림 (원 단위)
+  const digits = String(text).replace(/(\d)\.\d+/g, '$1').replace(/[^\d]/g, '');
   if (!digits) return null;
   const n = Number(digits);
   return Number.isSafeInteger(n) ? n : null;
@@ -390,5 +391,5 @@ export function valuedAt(bookAt: (month: string) => number, vals: { month: strin
 }
 
 /** '남은 돈'(수입 − 지출 − 저축·투자)을 알기 쉬운 이름으로: 0 이상이면 남은 돈, 마이너스면 통장에서 더 꺼내 쓴 돈 (금액은 부호 없이) */
-export const leftLabel = (v: number) => (v >= 0 ? '쓰고 모으고 남은 돈' : '통장에서 더 꺼내 쓴 돈');
+export const leftLabel = (v: number) => (v >= 0 ? '남은 돈' : '모자란 돈');
 export const LEFT_HINT = '수입 − 지출 − 저축·투자';

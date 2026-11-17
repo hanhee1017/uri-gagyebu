@@ -4,6 +4,7 @@ import { addMonths, monthLabel, monthOf } from '../shared/dates';
 import { parseAmount, rateText, won, type BudgetLine, type MonthTotals, leftLabel, LEFT_HINT } from '../shared/rules';
 import { isSpending } from '../shared/types';
 import { NoSpendCard } from './NoSpend';
+import { useLookImage } from './Look';
 import { api } from './api';
 import { GROUP_ICON, Icon, UiIcon } from './Icon';
 import type { Boot, Toast } from './data';
@@ -65,14 +66,10 @@ function YearReport({ y, onSave }: { y: YearData; onSave: (n: number) => void })
         ) : (
           <b>{y.target ? `${won(y.target)}원` : <span className="muted">아직 안 정했어요</span>}</b>
         )}
-        <small className="withico">
+        <small className="withico" title={`단기로드맵에 넣은 곳: ${(y.counted ?? []).join(' · ') || '없음'}${(y.left ?? []).length ? ` (제외: ${y.left!.join(' · ')})` : ''}`}>
           <UiIcon name="coins" size={14} /> 누적 실제 저축
         </small>
         <b>{won(y.saved)}원</b>
-        <span className="muted small">
-          단기로드맵에 넣은 곳: {(y.counted ?? []).join(' · ') || '없음'}
-          {(y.left ?? []).length > 0 && <> (빼고 셈: {y.left!.join(' · ')})</>}
-        </span>
         <small className="withico"><UiIcon name="pin" size={14} /> 누적 달성률</small>
         <Donut rate={rate} left={y.target ? Math.max(0, y.target - y.saved) : null} />
       </div>
@@ -81,6 +78,7 @@ function YearReport({ y, onSave }: { y: YearData; onSave: (n: number) => void })
 }
 
 export function Home({ boot, onError, toast, go }: { boot: Boot; onError: (e: unknown) => void; toast: Toast; go: (hash: string) => void }) {
+  const cover = useLookImage('cover', boot.coverVer);
   const [month, setMonth] = useState(monthOf(boot.today));
   const [d, setD] = useState<MonthData | null>(null);
   const load = useCallback(() => api<MonthData>(`/month?month=${month}`).then(setD).catch(onError), [month, onError]);
@@ -100,9 +98,9 @@ export function Home({ boot, onError, toast, go }: { boot: Boot; onError: (e: un
   const isNow = month === monthOf(boot.today);
 
   return (
-    <div className="split">
-      <div className="main-col">
+    <div className="home-wrap">
         <div className="head">
+          {cover && <img className="avatar" src={cover} alt="" />}
           <button className="btn sm" onClick={() => setMonth(addMonths(month, -1))}>
             ◀
           </button>
@@ -111,7 +109,14 @@ export function Home({ boot, onError, toast, go }: { boot: Boot; onError: (e: un
             ▶
           </button>
           {isNow && <span className="muted">{Number(boot.today.slice(8))}일까지</span>}
+          <span className="spacer" />
+          <span className="muted small">
+            단위 원 · 저축률 {t.saveRate === null ? '-' : `${(t.saveRate * 100).toFixed(1)}%`} · 지난달 지출 {won(d.prevTotals.spending)}
+          </span>
         </div>
+      {/* 위아래 줄을 맞춘 바둑판: [다짐·요약칸 | 연간 리포트] / [월별 요약… | 무지출·빠른 입력] */}
+      <div className="home-grid">
+      <div className="hg-a">
         {pledges.length > 0 && (
           <div className="card home-pl">
             <b className="withico">
@@ -169,15 +174,17 @@ export function Home({ boot, onError, toast, go }: { boot: Boot; onError: (e: un
             ] as const
           ).map(([n, v, k]) => (
             <div className="tile" key={k} title={k === 'left' ? LEFT_HINT : undefined}>
-              <small>{k === 'left' ? leftLabel(v) : n}</small>
+              <small className={`tl-${k}`}>
+                {k === 'left' ? leftLabel(v) : n}
+                {k === 'left' && <span className="tile-hint"> ({LEFT_HINT})</span>}
+              </small>
               <b className={k === 'left' && v < 0 ? 'bad' : ''}>{won(k === 'left' ? Math.abs(v) : v)}</b>
-              {k === 'left' && <small className="muted">{LEFT_HINT}</small>}
             </div>
           ))}
         </div>
-        <p className="muted small">
-          단위 원 · 저축률 {t.saveRate === null ? '-' : `${(t.saveRate * 100).toFixed(1)}%`} · 지난달 지출 {won(d.prevTotals.spending)}
-        </p>
+      </div>
+      <div className="hg-b">{y && <YearReport y={y} onSave={saveTarget} />}</div>
+      <div className="hg-c">
         {y && (
           <div className="card">
             <h3 className="withico"><UiIcon name="search" /> {year}년 월별 가계부 요약 <span className="muted small">— 줄을 누르면 그 달로 가요</span></h3>
@@ -190,7 +197,7 @@ export function Home({ boot, onError, toast, go }: { boot: Boot; onError: (e: un
                     <th className="r">총지출</th>
                     <th className="r">총저축</th>
                     <th className="r">총투자</th>
-                    <th className="r" title="쓰고 모으고 남은 돈 (마이너스 = 통장에서 더 꺼내 씀)">수입−지출−저축</th>
+                    <th className="r" title="남은 돈 (마이너스 = 모자란 돈)">수입−지출−저축</th>
                     <th className="r">저축·투자 비율</th>
                   </tr>
                 </thead>
@@ -291,8 +298,7 @@ export function Home({ boot, onError, toast, go }: { boot: Boot; onError: (e: un
           </table>
         </div>
       </div>
-      <div className="side-col">
-        {y && <YearReport y={y} onSave={saveTarget} />}
+      <div className="hg-d">
         {boot.nospendCal !== false && <NoSpendCard month={month} onError={onError} go={go} />}
         <div className="card only-desktop">
           <h3 className="withico"><UiIcon name="plus" /> 빠른 입력</h3>
@@ -305,6 +311,7 @@ export function Home({ boot, onError, toast, go }: { boot: Boot; onError: (e: un
             }}
           />
         </div>
+      </div>
       </div>
     </div>
   );
@@ -319,7 +326,7 @@ function Donut({ rate, left }: { rate: number | null; left: number | null }) {
     <div className="donut">
       <svg width="140" height="140" viewBox="0 0 140 140">
         <circle cx="70" cy="70" r={r} fill="none" stroke="#ece6df" strokeWidth="16" />
-        {p > 0 && <circle cx="70" cy="70" r={r} fill="none" stroke="#3f6e5a" strokeWidth="16" strokeLinecap="round" strokeDasharray={`${len * p} ${len}`} transform="rotate(-90 70 70)" />}
+        {p > 0 && <circle cx="70" cy="70" r={r} fill="none" style={{ stroke: "var(--accent)" }} strokeWidth="16" strokeLinecap="round" strokeDasharray={`${len * p} ${len}`} transform="rotate(-90 70 70)" />}
         <text x="70" y="74" textAnchor="middle" fontSize="24" fontWeight="800" fill="#2e2a27">
           {rate === null ? '-' : `${(rate * 100).toFixed(1)}%`}
         </text>
